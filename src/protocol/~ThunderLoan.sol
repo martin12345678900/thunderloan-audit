@@ -83,7 +83,6 @@ contract ThunderLoan is Initializable, OwnableUpgradeable, UUPSUpgradeable, Orac
     error ThunderLoan__AlreadyAllowed();
     error ThunderLoan__ExhangeRateCanOnlyIncrease();
     error ThunderLoan__NotCurrentlyFlashLoaning();
-    error ThunderLoan__CurrentlyFlashLoaning(IERC20 token);
     error ThunderLoan__BadNewFee();
 
     using SafeERC20 for IERC20;
@@ -155,11 +154,7 @@ contract ThunderLoan is Initializable, OwnableUpgradeable, UUPSUpgradeable, Orac
         s_flashLoanFee = 3e15; // 0.3% ETH fee // @audit-info - magic numbers
     }
 
-    // ok
     function deposit(IERC20 token, uint256 amount) external revertIfZero(amount) revertIfNotAllowedToken(token) {
-        // if (isCurrentlyFlashLoaning(token)) {
-        //     revert ThunderLoan__CurrentlyFlashLoaning(token);
-        // }
         // e get the asset token contract based on the underlying token
         AssetToken assetToken = s_tokenToAssetToken[token];
         // e get it's assetToken exchange rate - which is calculated based on the fee and totalSupply of the asset token
@@ -168,12 +163,13 @@ contract ThunderLoan is Initializable, OwnableUpgradeable, UUPSUpgradeable, Orac
         uint256 mintAmount = (amount * assetToken.EXCHANGE_RATE_PRECISION()) / exchangeRate;
         // e emit the deposit event
         emit Deposit(msg.sender, token, amount);
+        // q will that work since only thunder loan can mint due to onlyThunderLoan modifier ???
         // e mint the calculated asset tokens to the user
         assetToken.mint(msg.sender, mintAmount);
         // e calculate the new exchange rate based on the token price and amount user deposited
         uint256 calculatedFee = getCalculatedFee(token, amount);
+        // q will that work since only thunder loan can update the exchange rate due to onlyThunderLoan modifier ???
         // e update the exchange rate
-        // @audit-high - this unnessrayly updates the exchange rate which causes an issue in the redeem function
         assetToken.updateExchangeRate(calculatedFee);
         // transfer the token with the specified deposited amount to the asset token
         token.safeTransferFrom(msg.sender, address(assetToken), amount);
@@ -182,10 +178,6 @@ contract ThunderLoan is Initializable, OwnableUpgradeable, UUPSUpgradeable, Orac
     /// @notice Withdraws the underlying token from the asset token
     /// @param token The token they want to withdraw from
     /// @param amountOfAssetToken The amount of the underlying they want to withdraw
-
-    // e this function burns `amountOfAssetToken` asset tokens
-    // and based on the exchange rate and `amountOfAssetToken` we calculate how much underlying tokens should be transferred to the user
-    // and we transfer them to the user
     function redeem(
         IERC20 token,
         uint256 amountOfAssetToken
@@ -194,17 +186,14 @@ contract ThunderLoan is Initializable, OwnableUpgradeable, UUPSUpgradeable, Orac
         revertIfZero(amountOfAssetToken)
         revertIfNotAllowedToken(token)
     {
-        AssetToken assetToken = s_tokenToAssetToken[token]; // e get the asset token based on the underlying token
-        uint256 exchangeRate = assetToken.getExchangeRate(); // e get the exchange rate of the asset token to the underlying token
-        if (amountOfAssetToken == type(uint256).max) { // e the user wants to redeem all of their asset tokens
+        AssetToken assetToken = s_tokenToAssetToken[token];
+        uint256 exchangeRate = assetToken.getExchangeRate();
+        if (amountOfAssetToken == type(uint256).max) {
             amountOfAssetToken = assetToken.balanceOf(msg.sender);
         }
-        // e calculalte how much underlying tokens should be transferred to the user based on the exchange rate and amount of asset tokens
         uint256 amountUnderlying = (amountOfAssetToken * exchangeRate) / assetToken.EXCHANGE_RATE_PRECISION();
         emit Redeemed(msg.sender, token, amountOfAssetToken, amountUnderlying);
-        // e burn the asset tokens from the user
         assetToken.burn(msg.sender, amountOfAssetToken);
-        // e transfer the underlying tokens to the user
         assetToken.transferUnderlyingTo(msg.sender, amountUnderlying);
     }
 
@@ -219,7 +208,7 @@ contract ThunderLoan is Initializable, OwnableUpgradeable, UUPSUpgradeable, Orac
         revertIfNotAllowedToken(token)
     {
         AssetToken assetToken = s_tokenToAssetToken[token];
-        // @audit-info - token doesn't need to be wrapped in a IERC20 interface since it's already an IERC20
+        // q 
         uint256 startingBalance = IERC20(token).balanceOf(address(assetToken));
 
         if (amount > startingBalance) {
@@ -272,41 +261,29 @@ contract ThunderLoan is Initializable, OwnableUpgradeable, UUPSUpgradeable, Orac
         token.safeTransferFrom(msg.sender, address(assetToken), amount);
     }
 
-    // ok
     function setAllowedToken(IERC20 token, bool allowed) external onlyOwner returns (AssetToken) {
-        // e check if the token is allowed
         if (allowed) {
-            if (address(s_tokenToAssetToken[token]) != address(0)) { // e check if we already allowed the token as owner
-                revert ThunderLoan__AlreadyAllowed(); // @audit-info - maybe include the token in the error message
+            if (address(s_tokenToAssetToken[token]) != address(0)) {
+                revert ThunderLoan__AlreadyAllowed();
             }
-            // e create the name of the asset token based on the underlying token name
             string memory name = string.concat("ThunderLoan ", IERC20Metadata(address(token)).name());
-            // e create the symbol of the asset token based on the underlying token symbol
             string memory symbol = string.concat("tl", IERC20Metadata(address(token)).symbol());
-            // e create the asset token contract
             AssetToken assetToken = new AssetToken(address(this), token, name, symbol);
-            // e set the token to asset token => assetToken mapping
             s_tokenToAssetToken[token] = assetToken;
             emit AllowedTokenSet(token, assetToken, allowed);
-            // e return the asset token
             return assetToken;
         } else {
             AssetToken assetToken = s_tokenToAssetToken[token];
-            // e if `allowed` set to false delete the token to asset token mapping
             delete s_tokenToAssetToken[token];
             emit AllowedTokenSet(token, assetToken, allowed);
-            // e return the deleted asset token
             return assetToken;
         }
     }
 
     function getCalculatedFee(IERC20 token, uint256 amount) public view returns (uint256 fee) {
         //slither-disable-next-line divide-before-multiply
-
-        // e 100 USDC tokens with price of 1$ => valueBorrowed = 100e18 USDC * 1$ / 1e18 = 100
         uint256 valueOfBorrowedToken = (amount * getPriceInWeth(address(token))) / s_feePrecision;
         //slither-disable-next-line divide-before-multiply
-        // fee = 100e18 * 3e15 / 1e18 = 300e15 => 30e18 => 30$
         fee = (valueOfBorrowedToken * s_flashLoanFee) / s_feePrecision;
     }
 
